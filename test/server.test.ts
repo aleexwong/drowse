@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Config } from '../src/config.ts';
 import { createApp } from '../src/http.ts';
+import { DEFAULT_PRESETS } from '../src/extract/index.ts';
 import { MemoryStore } from '../src/store/memory.ts';
 
 const TOKEN = 'test-token-'.padEnd(40, 'z');
@@ -17,6 +18,7 @@ const config: Config = {
   store: 'memory',
   collection: 'transcripts',
   derivedCollection: 'derived',
+  presets: DEFAULT_PRESETS,
   projectId: undefined,
   databaseId: undefined,
 };
@@ -77,12 +79,12 @@ describe('auth', () => {
 });
 
 describe('MCP surface', () => {
-  test('Layer 0 exposes save_transcript and nothing else', async () => {
+  test('every tool is a write or a config read — none can see history', async () => {
     const client = await connect(`${baseUrl}/mcp/${TOKEN}`);
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((t) => t.name).sort(),
-      ['reextract_all', 'save_transcript'],
+      ['list_presets', 'log_caffeine', 'reextract_all', 'save_transcript'],
     );
     // Still no read path — a logging conversation cannot see history. Layer 2
     // added extraction, not access: reextract_all returns counts only.
@@ -106,7 +108,7 @@ describe('MCP surface', () => {
 
     const content = result.content as { type: string; text: string }[];
     assert.equal(content.length, 1);
-    assert.equal(content[0]?.text, 'Saved — caffeine 14:00, mood 3.');
+    assert.equal(content[0]?.text, 'Saved — caffeine 14:00 (95mg), mood 3.');
     assert.equal(content[0]?.text.includes('\n'), false);
     await client.close();
   });
@@ -117,10 +119,42 @@ describe('MCP surface', () => {
     const content = result.content as { type: string; text: string }[];
     const line = content[0]?.text ?? '';
 
-    assert.match(line, /^Re-extracted \d+ transcript\(s\) at caffeine-1\.0\.0/);
+    assert.match(line, /^Re-extracted \d+ transcript\(s\) at caffeine-2\.0\.0/);
     assert.match(line, /1 with a caffeine time/);
     // The summary must not leak a transcript, a date, or a single day's value.
     assert.equal(/bed around 11:40|2026-09-07|14:00/.test(line), false);
+    await client.close();
+  });
+
+  test('log_caffeine records a drink with no transcript and no model', async () => {
+    const client = await connect(`${baseUrl}/mcp/${TOKEN}`);
+    const result = await client.callTool({
+      name: 'log_caffeine',
+      arguments: { preset: 'flat-white', at: '14:00', date: '2026-09-08' },
+    });
+    const content = result.content as { type: string; text: string }[];
+    assert.equal(content[0]?.text, 'Saved — caffeine 14:00 (130mg), no mood stated.');
+    await client.close();
+  });
+
+  test('log_caffeine refuses an invented preset id', async () => {
+    const client = await connect(`${baseUrl}/mcp/${TOKEN}`);
+    const result = await client.callTool({
+      name: 'log_caffeine',
+      arguments: { preset: 'oat-milk-thing', at: '14:00' },
+    });
+    assert.equal(result.isError, true);
+    const content = result.content as { type: string; text: string }[];
+    assert.match(content[0]?.text ?? '', /Unknown preset/);
+    await client.close();
+  });
+
+  test('list_presets returns the catalogue and no entries', async () => {
+    const client = await connect(`${baseUrl}/mcp/${TOKEN}`);
+    const result = await client.callTool({ name: 'list_presets', arguments: {} });
+    const text = (result.content as { text: string }[])[0]?.text ?? '';
+    assert.match(text, /flat-white\s+130mg/);
+    assert.equal(/2026-09-0\d/.test(text), false);
     await client.close();
   });
 
@@ -132,6 +166,48 @@ describe('MCP surface', () => {
     });
     assert.equal(result.isError, true);
     await client.close();
+  });
+});
+
+describe('the HTTP quick-log path — no MCP client, no model', () => {
+  test('POST /caffeine stores a drink and returns the dose', async () => {
+    const res = await fetch(`${baseUrl}/caffeine`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ preset: 'cold-brew', at: '09:30', date: '2026-09-09' }),
+    });
+    assert.equal(res.status, 201);
+    const body = await res.json();
+    assert.equal(body.lastCaffeine, '09:30');
+    assert.equal(body.caffeineMg, 200);
+  });
+
+  test('POST /caffeine needs a token', async () => {
+    const res = await fetch(`${baseUrl}/caffeine`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ preset: 'coffee', at: '09:30' }),
+    });
+    assert.equal(res.status, 401);
+  });
+
+  test('a bad time is a 400, not a stored guess', async () => {
+    const res = await fetch(`${baseUrl}/caffeine`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ preset: 'coffee', at: '2pm' }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('GET /presets lists the catalogue', async () => {
+    const res = await fetch(`${baseUrl}/presets`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.count >= 20);
+    assert.ok(body.presets.some((p: { id: string; mg: number }) => p.id === 'flat-white' && p.mg === 130));
   });
 });
 
@@ -162,7 +238,11 @@ describe('export', () => {
     assert.ok(derived, 'the derived record is in the export');
     assert.equal(derived.lastCaffeine, '14:00');
     assert.equal(derived.caffeineStatus, 'time');
-    assert.equal(derived.extractionVersion, 'caffeine-1.0.0');
+    assert.equal(derived.caffeineMg, 95);
+    assert.deepEqual(derived.caffeineEvents, [
+      { presetId: 'coffee', label: 'Coffee', count: 1, mg: 95, time: '14:00' },
+    ]);
+    assert.equal(derived.extractionVersion, 'caffeine-2.0.0');
     assert.ok(derived.rulesetHash);
   });
 

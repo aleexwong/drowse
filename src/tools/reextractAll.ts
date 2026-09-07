@@ -12,8 +12,9 @@
  * no transcript text and no per-day value ever leaves this tool, so it stays
  * safe to expose in a logging conversation (PRD §6, §7).
  */
-import { EXTRACTION_VERSION, RULESET_HASH, extractDerived } from '../extract/index.ts';
+import { EXTRACTION_VERSION, extractDerived, rulesetHash } from '../extract/index.ts';
 import type { CaffeineStatus } from '../extract/caffeine.ts';
+import type { Config } from '../config.ts';
 import type { Store } from '../store/types.ts';
 
 export interface ReextractSummary {
@@ -25,7 +26,12 @@ export interface ReextractSummary {
   alreadyCurrent: number;
 }
 
-export async function reextractAll(store: Store, now: Date = new Date()): Promise<ReextractSummary> {
+export async function reextractAll(
+  store: Store,
+  config: Config,
+  now: Date = new Date(),
+): Promise<ReextractSummary> {
+  const hash = rulesetHash(config.presets);
   const [transcripts, existing] = await Promise.all([store.listAll(), store.listAllDerived()]);
 
   const before = new Map(existing.map((entry) => [entry.transcriptId, entry]));
@@ -34,11 +40,11 @@ export async function reextractAll(store: Store, now: Date = new Date()): Promis
 
   for (const transcript of transcripts) {
     const previous = before.get(transcript.id);
-    if (previous?.extractionVersion === EXTRACTION_VERSION && previous.rulesetHash === RULESET_HASH) {
+    if (previous?.extractionVersion === EXTRACTION_VERSION && previous.rulesetHash === hash) {
       alreadyCurrent += 1;
     }
 
-    const derived = extractDerived(transcript, now);
+    const derived = extractDerived(transcript, config.presets, now);
     counts[derived.caffeineStatus] = counts[derived.caffeineStatus] + 1;
     await store.putDerived(derived);
   }
@@ -46,7 +52,7 @@ export async function reextractAll(store: Store, now: Date = new Date()): Promis
   return {
     transcripts: transcripts.length,
     extractionVersion: EXTRACTION_VERSION,
-    rulesetHash: RULESET_HASH,
+    rulesetHash: hash,
     counts,
     alreadyCurrent,
   };

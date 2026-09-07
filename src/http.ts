@@ -2,9 +2,10 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { extractToken, tokenMatches } from './auth.ts';
 import type { Config } from './config.ts';
-import { EXTRACTION_VERSION } from './extract/index.ts';
+import { EXTRACTION_VERSION, QuickLogError } from './extract/index.ts';
 import { createMcpServer, SERVER_NAME, SERVER_VERSION } from './mcp.ts';
 import type { DerivedEntry, Store } from './store/types.ts';
+import { logCaffeine, logCaffeineSchema } from './tools/logCaffeine.ts';
 
 const JSONRPC_ERROR = (code: number, message: string) => ({
   jsonrpc: '2.0' as const,
@@ -62,6 +63,56 @@ export function createApp(store: Store, config: Config) {
   app.get('/mcp/:token', requireToken, rejectStreamMethods);
   app.delete('/mcp', requireToken, rejectStreamMethods);
   app.delete('/mcp/:token', requireToken, rejectStreamMethods);
+
+  // --- Presets --------------------------------------------------------------
+  // The quick-log path, reachable without an MCP client and without a model at
+  // all: a phone shortcut, a curl, a widget. A drink is a preset id and a time,
+  // and neither of those needs a conversation.
+  //
+  //   curl -H "authorization: Bearer $DROWSE_TOKEN" \
+  //        -H 'content-type: application/json' \
+  //        -d '{"preset":"flat-white","at":"14:00"}' https://…/caffeine
+  app.get('/presets', requireToken, (_req, res) => {
+    res.json({
+      count: config.presets.length,
+      presets: config.presets.map(({ id, label, mg, decaf }) => ({ id, label, mg, decaf: !!decaf })),
+    });
+  });
+
+  app.post('/caffeine', requireToken, async (req: Request, res: Response) => {
+    const parsed = logCaffeineSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid request', detail: parsed.error.issues });
+      return;
+    }
+
+    try {
+      const { transcript, derived, confirmation } = await logCaffeine(parsed.data, store, config);
+      console.log(
+        JSON.stringify({
+          event: 'caffeine.logged',
+          id: transcript.id,
+          date: transcript.date,
+          preset: parsed.data.preset,
+          at: parsed.data.at,
+          via: 'http',
+        }),
+      );
+      res.status(201).json({
+        confirmation,
+        date: transcript.date,
+        lastCaffeine: derived?.lastCaffeine ?? null,
+        caffeineMg: derived?.caffeineMg ?? null,
+      });
+    } catch (error) {
+      if (error instanceof QuickLogError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      console.error(JSON.stringify({ event: 'caffeine.error', message: String(error) }));
+      res.status(500).json({ error: 'Could not log the drink' });
+    }
+  });
 
   // --- Export ---------------------------------------------------------------
   // Reading history over HTTP is fine; reading it from an MCP tool is not.

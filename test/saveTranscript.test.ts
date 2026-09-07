@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import type { Config } from '../src/config.ts';
 import { todayIn } from '../src/config.ts';
+import { DEFAULT_PRESETS } from '../src/extract/index.ts';
 import { MemoryStore } from '../src/store/memory.ts';
 import {
   buildTranscript,
@@ -18,6 +19,7 @@ const config: Config = {
   store: 'memory',
   collection: 'transcripts',
   derivedCollection: 'derived',
+  presets: DEFAULT_PRESETS,
   projectId: undefined,
   databaseId: undefined,
 };

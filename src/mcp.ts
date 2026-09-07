@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Config } from './config.ts';
 import { EXTRACTION_VERSION } from './extract/index.ts';
 import type { Store } from './store/types.ts';
+import { QuickLogError, logCaffeine, logCaffeineShape, presetTable } from './tools/logCaffeine.ts';
 import { reextractAll, reextractLine } from './tools/reextractAll.ts';
 import { saveTranscript, saveTranscriptShape } from './tools/saveTranscript.ts';
 
@@ -9,13 +10,16 @@ export const SERVER_NAME = 'drowse';
 export const SERVER_VERSION = '0.1.0';
 
 /**
- * Two tools. `query_entries` is Layer 3 and is deliberately absent — a logging
- * conversation must not be able to read history (PRD §6, §7).
+ * Four tools, none of which can read history. `query_entries` is Layer 3 and is
+ * deliberately absent (PRD §6, §7).
  *
- * There is no `extract_entry` either. Extraction is deterministic and runs
- * inside `save_transcript`, so a per-entry extraction tool would only add a way
- * to point extraction at a day other than the one just spoken. `reextract_all`
- * covers the retroactive case and returns counts, never entries.
+ * `save_transcript` is the main path; `log_caffeine` is the preset path for when
+ * you do not want to talk; `list_presets` shows the catalogue; `reextract_all`
+ * is maintenance and returns counts.
+ *
+ * There is no `extract_entry`. Extraction is deterministic and runs inside the
+ * two write tools, so a per-entry extraction tool would only add a way to point
+ * extraction at a day other than the one just logged.
  */
 export function createMcpServer(store: Store, config: Config): McpServer {
   const server = new McpServer(
@@ -68,6 +72,67 @@ export function createMcpServer(store: Store, config: Config): McpServer {
   );
 
   server.registerTool(
+    'log_caffeine',
+    {
+      title: 'Log a drink from a preset',
+      description:
+        'Record one caffeinated drink by preset id and clock time, without a transcript. Use ' +
+        'this when the user names a drink and a time directly ("flat white at 2pm") instead of ' +
+        'talking through their morning. It stores a plain sentence as a form-captured ' +
+        'transcript and returns a confirmation line only. Call list_presets first if you do ' +
+        'not know the preset id — never invent one.',
+      inputSchema: logCaffeineShape,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (input) => {
+      try {
+        const { transcript, derived, confirmation } = await logCaffeine(input, store, config);
+        console.log(
+          JSON.stringify({
+            event: 'caffeine.logged',
+            id: transcript.id,
+            date: transcript.date,
+            preset: input.preset,
+            at: input.at,
+            count: input.count ?? 1,
+            caffeineMg: derived?.caffeineMg ?? null,
+          }),
+        );
+        return { content: [{ type: 'text', text: confirmation }] };
+      } catch (error) {
+        if (error instanceof QuickLogError) {
+          return { isError: true, content: [{ type: 'text', text: error.message }] };
+        }
+        throw error;
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_presets',
+    {
+      title: 'List drink presets',
+      description:
+        'Show every configured drink preset with its id and typical caffeine content. Reads ' +
+        'configuration only — it returns no entries, no dates and no history, so it is safe ' +
+        'to call at any time.',
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => ({ content: [{ type: 'text', text: presetTable(config) }] }),
+  );
+
+  server.registerTool(
     'reextract_all',
     {
       title: 'Re-extract every transcript',
@@ -86,7 +151,7 @@ export function createMcpServer(store: Store, config: Config): McpServer {
       },
     },
     async () => {
-      const summary = await reextractAll(store);
+      const summary = await reextractAll(store, config);
       console.log(JSON.stringify({ event: 'derived.reextracted', ...summary }));
       return { content: [{ type: 'text', text: reextractLine(summary) }] };
     },

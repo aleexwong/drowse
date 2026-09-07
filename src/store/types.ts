@@ -1,4 +1,4 @@
-import type { CaffeineStatus } from '../extract/caffeine.ts';
+import type { CaffeineEvent, CaffeineStatus } from '../extract/caffeine.ts';
 
 export type CaptureMethod = 'voice' | 'form';
 export type Phase = 'baseline' | 'intervention' | 'washout';
@@ -52,6 +52,13 @@ export interface DerivedEntry {
   /** Strict HH:MM (24-hour), or null. */
   lastCaffeine: string | null;
   caffeineStatus: CaffeineStatus;
+  /**
+   * Total dose for the day in milligrams, from the preset catalogue. Null when
+   * nothing with a known dose was found — an unknown total is not a zero total.
+   */
+  caffeineMg: number | null;
+  /** Every drink found, so a wrong total can be traced to the drink that caused it. */
+  caffeineEvents: CaffeineEvent[];
   extractionVersion: string;
   /** PRD calls this `promptHash`; the extractor is rules, not a prompt. */
   rulesetHash: string;

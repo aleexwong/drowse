@@ -91,7 +91,7 @@ export async function saveTranscript(
   // entry, so a failure here is logged and the save still stands.
   let derived: DerivedEntry | null = null;
   try {
-    derived = extractDerived(transcript);
+    derived = extractDerived(transcript, config.presets);
     await store.putDerived(derived);
   } catch (error) {
     console.error(

@@ -1,0 +1,23 @@
+{
+  "extends": "default",
+  "presets": [
+    {
+      "id": "coffee",
+      "label": "Coffee",
+      "mg": 140,
+      "aliases": ["coffee", "cup of coffee", "my usual", "the usual"]
+    },
+    {
+      "id": "home-espresso",
+      "label": "Home espresso",
+      "mg": 110,
+      "aliases": ["home espresso", "the machine", "my espresso"]
+    },
+    {
+      "id": "yerba-mate",
+      "label": "Yerba mate",
+      "mg": 85,
+      "aliases": ["yerba", "mate", "yerba mate"]
+    }
+  ]
+}

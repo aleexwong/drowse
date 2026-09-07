@@ -16,7 +16,9 @@ out of the words.
 > request. Nothing is at risk — transcripts stay append-only and untouched, and a
 > derived value can be thrown away and recomputed. But the gate exists because an
 > extractor tuned on zero real entries is tuned on guesses, so expect the rules to
-> need work once real mornings hit them. Layer 1 (sleep) is still not built. See
+> need work once real mornings hit them — and the preset doses are published
+> mid-range figures, not your machine and your mug, so override them before the
+> numbers get used for anything. Layer 1 (sleep) is still not built. See
 > `docs/prd.md` §16 for the first honest accuracy check.
 
 ## What exists
@@ -24,7 +26,9 @@ out of the words.
 | Piece | Where |
 |---|---|
 | `save_transcript` MCP tool | `src/tools/saveTranscript.ts` |
+| **Drink presets — doses, aliases, your overrides** | `src/extract/presets.ts` |
 | Caffeine extractor (deterministic, versioned) | `src/extract/caffeine.ts` |
+| **Quick log: CLI, HTTP, `log_caffeine`** | `src/caffeine.ts`, `src/http.ts` |
 | `reextract_all` MCP tool | `src/tools/reextractAll.ts` |
 | Derived records, regenerable | `src/store/*.ts` |
 | Remote MCP server (HTTP + token auth) | `src/http.ts`, `src/auth.ts` |
@@ -45,7 +49,7 @@ extraction at a day other than the one just spoken.
 ```bash
 npm install
 cp .env.example .env          # then fill in DROWSE_TOKEN
-npm test                      # 53 tests, no cloud needed
+npm test                      # 131 tests, no cloud needed
 npm run build && npm start
 ```
 
@@ -55,23 +59,49 @@ To run without Firestore:
 DROWSE_STORE=memory DROWSE_TOKEN=$(openssl rand -hex 32) npm run dev
 ```
 
+Log a drink without saying anything:
+
+```bash
+npm run caffeine -- --list
+npm run caffeine -- --preset flat-white --at 14:00
+```
+
 Deploying to Cloud Run and wiring up the phone: [`docs/deploy.md`](docs/deploy.md).
 
-## The two tools
+## Two ways in
+
+**Talk.** The main path, and still the point — the corpus is the product.
 
 ```
 save_transcript(text, statedMood?, date?, captureMethod?, phase?)
-  -> "Saved — caffeine 14:00, mood 3."
-
-reextract_all()
-  -> "Re-extracted 23 transcript(s) at caffeine-1.0.0 (bf90759d7bd29c46) — 18 with a
-      caffeine time, 2 with none, 1 unclear, 2 not mentioned."
+  -> "Saved — caffeine 14:00 (95mg), mood 3."
 ```
 
-Both return one line and nothing else. Neither has a read path a logging
-conversation can use: `save_transcript` reports only the entry just spoken, and
-`reextract_all` reports counts — never a transcript, a date, or a single day's
-value. That is the bias control in the schema rather than in a prompt.
+**Or just log the drink.** No sentence, no phrasing, no model:
+
+```bash
+npm run caffeine -- --preset flat-white --at 14:00
+# Saved — caffeine 14:00 (130mg), no mood stated.
+
+curl -H "authorization: Bearer $DROWSE_TOKEN" -H 'content-type: application/json' \
+     -d '{"preset":"cold-brew","at":"09:30"}' https://…/caffeine
+```
+
+Same thing from a phone shortcut, a widget, or `log_caffeine` in a chat. The
+preset expands into a plain sentence — `One flat white at 14:00.` — and goes
+through the same store and the same extractor as everything else. It is a real,
+re-extractable transcript, not a number smuggled past the corpus, and it is
+tagged `captureMethod: "form"` so form-vs-voice stays visible as a bias control.
+
+A tracker you can only reach through an LLM is a tracker you cannot use when the
+connector is down, when you are offline, or when you simply do not feel like
+narrating your morning.
+
+**Tools on the connector:** `save_transcript`, `log_caffeine`, `list_presets`,
+`reextract_all`. Every one is a write or a config read. There is no read path a
+logging conversation can use — `reextract_all` returns counts, never a
+transcript, a date, or a single day's value. That is the bias control in the
+schema rather than in a prompt.
 
 ## Three rules the code enforces
 
@@ -96,6 +126,10 @@ with four values rather than a bare time-or-null:
 | `none` | Explicitly no caffeine that day | `null` |
 | `unclear` | Mentioned, but no usable time | `null` |
 | `unmentioned` | Never came up | `null` |
+
+`caffeineMg` follows the same rule: `null` is "no dose I can put a number on",
+never `0`. "Caffeine at 2pm" gives a time and a null dose, because it says
+nothing about how much.
 
 A day with no coffee and a day where you forgot to say are different facts.
 Collapsing them would quietly poison the Layer 3 gate, which asks whether the
@@ -130,11 +164,19 @@ The extractor writes a second, regenerable record beside it:
   "date": "2026-09-07",
   "lastCaffeine": "14:00",
   "caffeineStatus": "time",
-  "extractionVersion": "caffeine-1.0.0",
-  "rulesetHash": "bf90759d7bd29c46",
+  "caffeineMg": 225,
+  "caffeineEvents": [
+    { "presetId": "flat-white", "label": "Flat white", "count": 1, "mg": 130, "time": "08:00" },
+    { "presetId": "coffee", "label": "Coffee", "count": 1, "mg": 95, "time": "14:00" }
+  ],
+  "extractionVersion": "caffeine-2.0.0",
+  "rulesetHash": "0fdbfda70e432451",
   "extractedAt": "2026-09-07T15:02:00.100Z"
 }
 ```
+
+`caffeineEvents` is there so a wrong total can be traced to the drink that caused
+it, rather than leaving you with one number and no way to argue with it.
 
 Transcripts are append-only; derived records are overwritten on every
 re-extraction. That asymmetry is the whole design: the words are the asset, the
@@ -149,39 +191,84 @@ npm run export -- --out exports/drowse-$(date +%F).json
 Full transcripts included, from day one. **Firebase is not a backup.** Losing the
 corpus is the worst realistic failure and it gets worse every month.
 
-## How the caffeine extractor works
+## The presets are the whole vocabulary
 
-Deterministic rules over the transcript text — not a model prompt, and no API
-key. That is what lets `reextract_all` re-run over the whole corpus offline, and
-what makes the same transcript give the same number every time. A drifting
-measuring stick between baseline and intervention would invalidate the
-comparison.
+`src/extract/presets.ts` is the single place that knows what a drink is called
+and what it contains. There is no second hardcoded word list: the aliases in that
+file are exactly what the parser matches, and the milligrams are exactly what a
+match is worth. Teaching Drowse a new drink is a data change.
 
-The rules, in short:
+```
+coffee           95mg    coffee, cup of coffee, drip coffee, filter coffee…
+espresso         63mg    espresso, single espresso, shot, shot of espresso
+double-espresso  126mg   double espresso, doppio, double shot, two shots
+flat-white       130mg   flat white
+cold-brew        200mg   cold brew, nitro, nitro cold brew
+black-tea        47mg    tea, black tea, english breakfast, earl grey…
+…24 in total — `npm run caffeine -- --list`
+```
 
-- **Drink words**: coffee, espresso, latte, matcha, cola, energy drink and so on,
-  singular or plural. `decaf`, `herbal`, `peppermint` in front of one cancels it.
+**Override them, because the defaults are wrong for you.** Point `DROWSE_PRESETS`
+at your own file (see `presets.example.json`):
+
+```json
+{
+  "extends": "default",
+  "presets": [
+    { "id": "coffee", "label": "Coffee", "mg": 140,
+      "aliases": ["coffee", "my usual", "the usual"] }
+  ]
+}
+```
+
+Now "my usual at 7am" is 140mg. Omit `extends` to replace the catalogue outright.
+A malformed file is fatal at startup — your own milligrams quietly reverting to
+mid-range guesses is exactly the drift the versioning exists to prevent, and two
+presets claiming the same alias is refused rather than resolved by array order.
+
+Doses are typical servings, not measurements. A "coffee" spans a 2x range, which
+is the same false-precision problem that got food tracking cut (PRD §8). They are
+here because *relative* dose across your own days is the useful signal — a 200mg
+cold brew and a 63mg latte are not the same input — and because a number you can
+override beats a category you cannot.
+
+## How the extractor reads a sentence
+
+Deterministic rules, no API key, no model call. That is what lets
+`reextract_all` re-run over the whole corpus offline, and what makes the same
+transcript give the same number forever — a drifting measuring stick between
+baseline and intervention would invalidate the comparison.
+
+- **Longest alias wins.** "Green tea" beats "tea", "double espresso" beats
+  "espresso", "instant coffee" beats "coffee" — from the catalogue, with no
+  special cases in the code.
+- **Counts multiply.** "Two coffees" is 190mg. "A couple of lattes" is 126mg.
 - **Times**: `2pm`, `2:15pm`, `14:30`, `2.45pm`, `noon`, `midnight`. A bare number
   is *not* a time — "coffee at 3" could be either end of the day, so it is
-  `unclear` rather than a coin flip.
-- **Attachment**: the nearest time after the drink word, never across a sentence
-  break. "Coffee at 2pm, bed at 11:40pm" gives 14:00, not the bedtime.
-- **Boundaries are not cups**: "coffees before 10am", "nothing past 3pm" name a
-  limit, not a drink. Refused, marked `unclear`.
-- **Negation**: "no coffee yesterday" is `none`. But "no coffee *after 2pm*" is
-  `unclear` — something was drunk earlier, so it is not an abstinent day.
-- **Last wins**: across several drink words, the latest stated time.
+  `unclear` rather than a coin flip. Use the quick-log path and the question
+  never arises.
+- **Each clock belongs to one drink.** In "americano at 11, cold brew at 2pm" the
+  bare "11" is not a time, and the americano does not get to reach past the cold
+  brew and claim its 2pm. Its time is null; its dose still counts.
+- **Never across a sentence break.** "Coffee at 2pm. Woke at 7:15." gives 14:00.
+- **Boundaries are not cups.** "Coffees before 10am", "nothing past 3pm" name a
+  limit. Refused, marked `unclear`, rather than recorded wrong.
+- **Negation**: "no coffee yesterday" is `none`; "no coffee *after 2pm*" is
+  `unclear`, because something was drunk earlier.
+- **Decaf is scored, not ignored.** "Decaf latte" is one drink worth 3mg, and it
+  does not move `lastCaffeine`. A decaf-only day is `none`.
 
 Known limitation: *"coffee at 8am, another at 1:15pm"* returns 08:00, because
-"another" is not a drink word. Saying "last coffee at 1:15pm" fixes it, and
-under-reporting an earlier cup beats importing a bedtime.
+"another" is not a drink word. Say "last coffee at 1:15pm", or add "another" as
+an alias, or just log it with a preset.
 
-Every derived record stores `extractionVersion` and `rulesetHash`, so improving
-the rules cannot silently change old numbers (PRD §4.3). The PRD calls the second
-field `promptHash`; there is no prompt here, so the honest name is used.
+Every derived record stores `extractionVersion` and `rulesetHash` — a hash of the
+rules *and* the catalogue, so retuning a dose makes old records visibly stale
+rather than silently mixed (PRD §4.3). The PRD calls the second field
+`promptHash`; there is no prompt here, so the honest name is used.
 
-Fixing a wrong value means fixing the rules and re-running — never editing a
-transcript:
+Fixing a wrong value means fixing the rules or the preset and re-running — never
+editing a transcript:
 
 ```
 reextract_all()
@@ -228,11 +315,14 @@ src/
     types.ts            Transcript, DerivedEntry, the store interfaces
     firestore.ts        append-only via create()
     memory.ts           tests and local runs
+  caffeine.ts           quick-log CLI — no server, no model
   extract/
+    presets.ts          the drink catalogue: doses, aliases, your overrides
     caffeine.ts         the rules, the version, the ruleset hash
-    index.ts            derived-record building, confirmation fragment
+    index.ts            derived records, preset expansion
   tools/
     saveTranscript.ts   schema, record building, confirmation line
+    logCaffeine.ts      the preset path
     reextractAll.ts     whole-corpus re-extraction, counts only
 ```
 

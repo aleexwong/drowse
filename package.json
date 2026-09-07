@@ -3,15 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Drowse Layer 0 — remote MCP server for voice journal capture.",
-  "engines": { "node": ">=22" },
+  "description": "Drowse Layer 0 \u2014 remote MCP server for voice journal capture.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "node --experimental-strip-types --watch src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "export": "node --experimental-strip-types src/export.ts"
+    "export": "node --experimental-strip-types src/export.ts",
+    "caffeine": "node --experimental-strip-types src/caffeine.ts"
   },
   "dependencies": {
     "@google-cloud/firestore": "^9.0.1",

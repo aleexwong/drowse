@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { PresetError, loadPresets, type CaffeinePreset } from './extract/presets.ts';
 import type { Phase } from './store/types.ts';
 
 const PHASES = ['baseline', 'intervention', 'washout'] as const;
@@ -27,6 +29,28 @@ function timezone(name: string, fallback: string): string {
   return value;
 }
 
+/**
+ * Read the preset catalogue. A bad file is fatal at startup rather than silently
+ * falling back to the defaults: your own milligrams quietly reverting to
+ * mid-range guesses is the kind of drift the whole versioning scheme exists to
+ * make visible.
+ */
+function presets(path: string | undefined): CaffeinePreset[] {
+  if (!path) return loadPresets();
+  let json: string;
+  try {
+    json = readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new Error(`DROWSE_PRESETS points at a file that cannot be read: ${path} (${String(error)})`);
+  }
+  try {
+    return loadPresets(json);
+  } catch (error) {
+    if (error instanceof PresetError) throw new Error(`DROWSE_PRESETS (${path}): ${error.message}`);
+    throw error;
+  }
+}
+
 export interface Config {
   port: number;
   token: string;
@@ -35,6 +59,8 @@ export interface Config {
   store: 'firestore' | 'memory';
   collection: string;
   derivedCollection: string;
+  /** The drink catalogue the extractor and the quick-log path both run on. */
+  presets: CaffeinePreset[];
   projectId: string | undefined;
   databaseId: string | undefined;
 }
@@ -63,6 +89,7 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     defaultPhase: phase('DROWSE_DEFAULT_PHASE', 'baseline'),
     store,
     collection: process.env.DROWSE_COLLECTION ?? 'transcripts',
+    presets: presets(process.env.DROWSE_PRESETS),
     derivedCollection: process.env.DROWSE_DERIVED_COLLECTION ?? 'derived',
     projectId: process.env.GOOGLE_CLOUD_PROJECT,
     databaseId: process.env.FIRESTORE_DATABASE_ID,

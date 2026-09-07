@@ -1,96 +1,88 @@
 /**
- * Layer 2 — caffeine timing extraction (PRD §3, §4.1).
+ * Layer 2 — caffeine extraction (PRD §3, §4.1).
  *
- * This is a *deterministic rule set*, not a model prompt. That choice matters:
+ * Deterministic rules over the transcript, driven entirely by the preset
+ * catalogue in `presets.ts`. There is no separate hardcoded word list: what the
+ * parser recognises is exactly what you have configured, so teaching it a new
+ * drink is a data change, not a code change.
  *
- *  - `reextract_all` has to be able to re-run over the whole corpus at any time,
- *    offline, with no API key and no cost per entry (PRD §10, §11).
- *  - The same transcript must produce the same value every time, or comparing
- *    baseline against intervention is comparing two different measuring sticks.
+ * Rules rather than a model call, because:
+ *
+ *  - `reextract_all` re-runs over the whole corpus at will, offline, with no API
+ *    key and no per-entry cost (PRD §10, §11).
+ *  - The same transcript must give the same numbers forever, or comparing
+ *    baseline against intervention compares two different measuring sticks.
  *
  * The PRD calls the version fingerprint `promptHash`. There is no prompt here,
- * so the derived record stores `rulesetHash` instead — same job, honest name.
+ * so the derived record stores `rulesetHash` — same job, honest name.
  *
- * The rules only ever read the transcript text. They never see history, and they
- * never touch `statedMood`: mood is stated, never inferred (PRD §4.2).
+ * The rules read the transcript text and nothing else. Never history, and never
+ * `statedMood`: mood is stated, never inferred (PRD §4.2).
  */
 import { createHash } from 'node:crypto';
+import { DOSELESS, aliasIndex, type CaffeinePreset } from './presets.ts';
 
 /**
- * Four outcomes, kept apart on purpose. `null` means "not mentioned" and is not
- * `false` and not zero (PRD §4.1) — a day with no caffeine at all and a day
- * where I forgot to say are different facts, and collapsing them would quietly
- * poison the Layer 3 gate ("does the timing actually vary?").
+ * Four outcomes, kept apart. `null` is "not mentioned", which is not `false` and
+ * not zero (PRD §4.1) — a day with no caffeine and a day you forgot to mention
+ * are different facts, and collapsing them would poison the Layer 3 gate.
  */
-export type CaffeineStatus =
-  /** A time was stated and parsed. `lastCaffeine` is set. */
-  | 'time'
-  /** Caffeine was mentioned and explicitly denied — none that day. */
-  | 'none'
-  /** Caffeine was mentioned but no usable time came with it. */
-  | 'unclear'
-  /** Caffeine never came up in the transcript. */
-  | 'unmentioned';
+export type CaffeineStatus = 'time' | 'none' | 'unclear' | 'unmentioned';
+
+/** One drink, as found in the transcript. */
+export interface CaffeineEvent {
+  presetId: string;
+  label: string;
+  /** How many of them: "two coffees" is 2. */
+  count: number;
+  /** Total milligrams for this event, `count * preset.mg`. Null when the dose is unknown. */
+  mg: number | null;
+  /** `HH:MM`, or null when the drink was named without a usable time. */
+  time: string | null;
+}
 
 export interface CaffeineExtraction {
-  /** Strict `HH:MM`, 24-hour, or null. Never a guess (PRD §6). */
+  /** Every drink found, in the order spoken. */
+  events: CaffeineEvent[];
+  /** Latest stated time across all events. Strict `HH:MM`, or null. */
   lastCaffeine: string | null;
+  /**
+   * Total dose for the day, milligrams. Null when nothing with a known dose was
+   * found — an unknown total is not a zero total.
+   */
+  totalMg: number | null;
   caffeineStatus: CaffeineStatus;
 }
 
-/** Things that carry caffeine. Order does not matter; longest match wins. */
-const CAFFEINE_TERMS = [
-  'coffee',
-  'espresso',
-  'americano',
-  'cappuccino',
-  'macchiato',
-  'cortado',
-  'flat white',
-  'cold brew',
-  'latte',
-  'mocha',
-  'caffeine',
-  'caffeinated',
-  'matcha',
-  'chai',
-  'tea',
-  'energy drink',
-  'red bull',
-  'monster',
-  'cola',
-  'coke',
-];
-
-/**
- * A word right before the drink that takes the caffeine back out of it.
- * "decaf latte" and "peppermint tea" are not caffeine events.
- */
-const NON_CAFFEINE_QUALIFIERS = [
-  'decaf',
-  'decaffeinated',
-  'herbal',
-  'chamomile',
-  'camomile',
-  'peppermint',
-  'mint',
-  'rooibos',
-  'ginger',
-  'fruit',
-  'no-caf',
-];
-
-/** "no coffee", "didn't have any coffee", "skipped the espresso". */
+/** "no coffee", "didn't have any", "skipped the espresso". */
 const NEGATION =
   /\b(?:no|none|zero|not|never|skipped|skipping|avoided|without|didn['’]?t|hadn['’]?t|haven['’]?t|did not|had no)\b/i;
 
 /**
- * Times, most specific alternative first:
+ * A word that makes a time a boundary rather than a cup. "Coffees before 10am"
+ * and "nothing after 2pm" name a limit; the actual last drink was some other
+ * time, so the number is refused instead of recorded wrong.
+ */
+const BOUNDARY = /\b(?:before|until|till|by|prior to|up to|after|past)\s*$/i;
+
+/** "two coffees", "a couple of espressos", "3 teas". */
+const COUNT = /\b(a|an|one|two|three|four|five|six|couple(?: of)?|\d{1,2})\s*$/i;
+const COUNT_WORDS: Record<string, number> = {
+  a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+  couple: 2, 'couple of': 2,
+};
+
+/** Turns a real drink into a decaf one when it sits right in front. */
+const DECAF_PREFIX = /\b(?:decaf|decaffeinated|no-caf|caffeine-free)\b[\s-]*$/i;
+
+/**
+ * Times, most specific first:
  *   1. `2:15pm` / `2.15 p.m.`   2. `14:00`   3. `2pm`   4. `noon` / `midnight`
  *
- * A bare number is deliberately NOT a time. "coffee at 3" could be either end of
- * the day, and the whole point of the field is *when*. Vague input is `unclear`,
- * not a coin flip (PRD §6).
+ * A bare number is deliberately not a time. "Coffee at 3" could be either end of
+ * the day, and the field's whole job is *when*, so it is `unclear` rather than a
+ * coin flip (PRD §6). The quick-log path exists so you never have to rely on
+ * phrasing anyway.
  */
 const TIME_RE =
   /(?<![\w:.])(?:(\d{1,2})[:.](\d{2})\s*([ap])\.?\s?m\.?|(\d{1,2})[:.](\d{2})|(\d{1,2})\s*([ap])\.?\s?m\.?|(noon|midday|midnight))/gi;
@@ -102,41 +94,42 @@ const BEFORE_WINDOW = 25;
 /** How far back to look for a "no" attached to the drink word. */
 const NEGATION_WINDOW = 30;
 
-/**
- * A word that turns a time into a boundary rather than a cup. "Coffees before
- * 10am" and "no caffeine after 2pm" both name a limit — the actual last cup was
- * some other time — so the time is refused and the day is `unclear`.
- */
-const BOUNDARY = /\b(?:before|until|till|by|prior to|up to|after|past)\s*$/i;
-
-export const EXTRACTION_VERSION = 'caffeine-1.0.0';
+export const EXTRACTION_VERSION = 'caffeine-2.0.0';
 
 /**
- * Fingerprint of the rules above. Every derived record stores it, so improving
- * the extractor cannot silently change old numbers — a mixed-version dataset is
- * visible instead of invisible (PRD §4.3).
+ * Fingerprint of the rules *and* the catalogue they run on. Retuning a preset's
+ * milligrams changes this, so a mixed-version dataset is visible instead of
+ * invisible (PRD §4.3). Every derived record stores it.
  */
-export const RULESET_HASH = createHash('sha256')
-  .update(
-    JSON.stringify({
-      version: EXTRACTION_VERSION,
-      terms: CAFFEINE_TERMS,
-      qualifiers: NON_CAFFEINE_QUALIFIERS,
-      negation: NEGATION.source,
-      time: TIME_RE.source,
-      windows: [AFTER_WINDOW, BEFORE_WINDOW, NEGATION_WINDOW],
-    }),
-  )
-  .digest('hex')
-  .slice(0, 16);
+export function rulesetHash(presets: CaffeinePreset[]): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        version: EXTRACTION_VERSION,
+        presets: presets.map((p) => [p.id, p.mg, p.decaf ?? false, [...p.aliases].sort()]),
+        negation: NEGATION.source,
+        boundary: BOUNDARY.source,
+        count: COUNT.source,
+        decaf: DECAF_PREFIX.source,
+        time: TIME_RE.source,
+        windows: [AFTER_WINDOW, BEFORE_WINDOW, NEGATION_WINDOW],
+      }),
+    )
+    .digest('hex')
+    .slice(0, 16);
+}
 
-interface Found {
+interface Span {
   start: number;
   end: number;
 }
 
-interface FoundTime extends Found {
+interface FoundTime extends Span {
   hhmm: string;
+}
+
+interface FoundDrink extends Span {
+  preset: CaffeinePreset;
 }
 
 function hhmm(hour: number, minute: number, meridiem?: string): string | null {
@@ -162,44 +155,52 @@ function findTimes(text: string): FoundTime[] {
     else if (h3 && mer3) value = hhmm(Number(h3), 0, mer3);
     else if (word) value = word.toLowerCase() === 'midnight' ? '00:00' : '12:00';
 
-    if (value !== null) {
-      times.push({ start: m.index, end: m.index + full.length, hhmm: value });
-    }
+    if (value !== null) times.push({ start: m.index, end: m.index + full.length, hhmm: value });
   }
   return times;
 }
 
-function findTerms(lower: string): Found[] {
-  const found: Found[] = [];
-  for (const term of CAFFEINE_TERMS) {
-    // `s?` so "two coffees" and "a couple of lattes" still count.
-    const re = new RegExp(`\\b${term}s?\\b`, 'g');
+/**
+ * Match preset aliases, longest first, and never inside an already-matched span.
+ * That is what makes "green tea" beat "tea" and "double espresso" beat
+ * "espresso" without a single special case in the code.
+ */
+function findDrinks(lower: string, presets: CaffeinePreset[]): FoundDrink[] {
+  const taken: Span[] = [];
+  const found: FoundDrink[] = [];
+
+  for (const { alias, preset } of aliasIndex(presets)) {
+    // `s?` so "two coffees" and "a couple of lattes" count.
+    const re = new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}s?\\b`, 'g');
     for (const m of lower.matchAll(re)) {
-      found.push({ start: m.index, end: m.index + m[0].length });
+      const span = { start: m.index, end: m.index + m[0].length };
+      if (taken.some((t) => span.start < t.end && t.start < span.end)) continue;
+      taken.push(span);
+      found.push({ ...span, preset });
     }
   }
-  // Earliest first, longest first on a tie, then drop anything that overlaps a
-  // hit already kept — so "flat white" counts once, not as "flat white" plus a
-  // second, shorter match inside it.
-  found.sort((a, b) => a.start - b.start || b.end - a.end);
+  found.sort((a, b) => a.start - b.start);
 
-  const kept: Found[] = [];
-  let lastEnd = -1;
-  for (const hit of found) {
-    if (hit.start < lastEnd) continue;
-    kept.push(hit);
-    lastEnd = hit.end;
-  }
-  return kept;
+  // "Decaf latte" is one drink, not a decaf plus a latte. Drop the standalone
+  // decaf marker when a real drink follows it immediately; DECAF_PREFIX then
+  // scores the pair as a decaf.
+  return found.filter((drink, i) => {
+    if (drink.preset.id !== 'decaf') return true;
+    const next = found[i + 1];
+    return !next || next.start - drink.end > 2;
+  });
 }
 
-function isDecaffeinated(lower: string, term: Found): boolean {
-  const before = lower.slice(Math.max(0, term.start - 20), term.start);
-  return NON_CAFFEINE_QUALIFIERS.some((q) => new RegExp(`\\b${q}\\b[\\s-]*$`).test(before));
+function countBefore(lower: string, drink: FoundDrink): number {
+  const before = lower.slice(Math.max(0, drink.start - 16), drink.start);
+  const m = COUNT.exec(before);
+  if (!m?.[1]) return 1;
+  const word = m[1].toLowerCase().trim();
+  return COUNT_WORDS[word] ?? Math.max(1, Math.min(20, Number(word) || 1));
 }
 
-function isNegated(lower: string, term: Found): boolean {
-  return NEGATION.test(lower.slice(Math.max(0, term.start - NEGATION_WINDOW), term.start));
+function isNegated(lower: string, drink: FoundDrink): boolean {
+  return NEGATION.test(lower.slice(Math.max(0, drink.start - NEGATION_WINDOW), drink.start));
 }
 
 /** A sentence break between two spans means they are not talking about each other. */
@@ -208,81 +209,132 @@ function separated(text: string, from: number, to: number): boolean {
 }
 
 /**
- * The time nearest a drink word — after it first, then before it, and never
- * across a sentence break. Nearest rather than latest-in-sentence, because
- * "bed at 11:40pm, coffee at 2pm" must not read the bedtime as a coffee.
+ * Attach clock times to drinks.
  *
- * Known limitation: "coffee at 8am, another at 1:15pm" yields 08:00, since
- * "another" is not a drink word. Saying "last coffee at 1:15pm" fixes it, and
- * that is the phrasing the field is built around. Under-reporting an earlier
- * cup is the safer failure than importing a bedtime.
+ * A time is scored against every drink — after the drink first, then before it,
+ * never across a sentence break — and then goes to whichever drink it sits
+ * closest to. That last step matters: in "americano at 11, cold brew at 2pm",
+ * the bare "11" is not a time, and without ownership the americano would reach
+ * past the cold brew and claim its 2pm. Each clock belongs to one drink.
  *
- * `boundaryRefused` reports that a time was there but named a limit rather than
- * a cup. The caller needs that: it is the difference between "no caffeine" and
- * "no caffeine after 2pm", which are not the same day.
+ * `boundaryRefused` records that a time was there but named a limit, not a cup.
+ * The caller needs it: it separates "no caffeine" from "no caffeine after 2pm",
+ * which are not the same day.
  */
-function timeFor(
+function assignTimes(
   text: string,
-  term: Found,
+  drinks: FoundDrink[],
   times: FoundTime[],
-): { hhmm: string | null; boundaryRefused: boolean } {
-  let best: FoundTime | undefined;
-  let bestGap = Infinity;
-  let boundaryRefused = false;
+): { hhmm: string | null; boundaryRefused: boolean }[] {
+  const result = drinks.map(() => ({ hhmm: null as string | null, boundaryRefused: false }));
+  const gaps: number[][] = drinks.map(() => times.map(() => Infinity));
 
-  for (const time of times) {
-    const after = time.start >= term.end;
-    const distance = after ? time.start - term.end : term.start - time.end;
-    if (distance < 0) continue;
-    if (distance > (after ? AFTER_WINDOW : BEFORE_WINDOW)) continue;
-    if (separated(text, after ? term.end : time.end, after ? time.start : term.start)) continue;
-    if (BOUNDARY.test(text.slice(Math.max(0, time.start - 12), time.start))) {
-      boundaryRefused = true;
-      continue;
-    }
-
-    // A time before the word is a weaker signal, so it only wins when nothing
-    // sits after the word at all.
-    const gap = after ? distance : distance + AFTER_WINDOW;
-    if (gap < bestGap) {
-      bestGap = gap;
-      best = time;
+  for (let d = 0; d < drinks.length; d += 1) {
+    const drink = drinks[d]!;
+    for (let t = 0; t < times.length; t += 1) {
+      const time = times[t]!;
+      const after = time.start >= drink.end;
+      const distance = after ? time.start - drink.end : drink.start - time.end;
+      if (distance < 0) continue;
+      if (distance > (after ? AFTER_WINDOW : BEFORE_WINDOW)) continue;
+      if (separated(text, after ? drink.end : time.end, after ? time.start : drink.start)) continue;
+      if (BOUNDARY.test(text.slice(Math.max(0, time.start - 12), time.start))) {
+        result[d]!.boundaryRefused = true;
+        continue;
+      }
+      // A time before the drink is a weaker signal, so it only wins when
+      // nothing sits after the drink at all.
+      gaps[d]![t] = after ? distance : distance + AFTER_WINDOW;
     }
   }
-  return { hhmm: best?.hhmm ?? null, boundaryRefused };
+
+  const bestForDrink = drinks.map(() => Infinity);
+
+  for (let t = 0; t < times.length; t += 1) {
+    let owner = -1;
+    let ownerGap = Infinity;
+    for (let d = 0; d < drinks.length; d += 1) {
+      if (gaps[d]![t]! < ownerGap) {
+        ownerGap = gaps[d]![t]!;
+        owner = d;
+      }
+    }
+    if (owner === -1) continue;
+
+    // A drink keeps the closest of the times that chose it.
+    if (ownerGap < bestForDrink[owner]!) {
+      bestForDrink[owner] = ownerGap;
+      result[owner]!.hhmm = times[t]!.hhmm;
+    }
+  }
+  return result;
 }
 
 /**
- * Pure. Same text in, same values out, forever — that is what makes the
- * `extractionVersion` on the derived record mean anything.
+ * Pure. Same text and same catalogue in, same values out, forever — that is what
+ * makes `extractionVersion` and `rulesetHash` mean anything.
  */
-export function extractCaffeine(text: string): CaffeineExtraction {
+export function extractCaffeine(text: string, presets: CaffeinePreset[]): CaffeineExtraction {
   const lower = text.toLowerCase();
-  const terms = findTerms(lower).filter((term) => !isDecaffeinated(lower, term));
-  if (terms.length === 0) return { lastCaffeine: null, caffeineStatus: 'unmentioned' };
+  const drinks = findDrinks(lower, presets);
+  const empty = { events: [], lastCaffeine: null, totalMg: null };
+
+  if (drinks.length === 0) return { ...empty, caffeineStatus: 'unmentioned' };
 
   const times = findTimes(text);
+  const decafPreset = presets.find((preset) => preset.id === 'decaf');
+  const events: CaffeineEvent[] = [];
   let latest: string | null = null;
+  let totalMg: number | null = null;
   let sawPositiveMention = false;
 
-  for (const term of terms) {
-    const negated = isNegated(lower, term);
-    const { hhmm: time, boundaryRefused } = timeFor(text, term, times);
+  const attached = assignTimes(text, drinks, times);
+  let sawCaffeinated = false;
+
+  for (const [index, drink] of drinks.entries()) {
+    const negated = isNegated(lower, drink);
+    const { hhmm: time, boundaryRefused } = attached[index]!;
 
     // "No coffee after 2pm" is a cutoff, not a cup — and not an abstinent day
-    // either. Something was drunk before 2pm, so it is `unclear`, never `none`.
-    // Refusing the number costs one unclear day and avoids a wrong time, which
-    // is the trade the whole extractor is built around.
+    // either, since something was drunk earlier. Refusing the number costs one
+    // unclear day and avoids a wrong time, which is the trade throughout.
     if (negated) {
-      if (time !== null || boundaryRefused) sawPositiveMention = true;
+      if (time !== null || boundaryRefused) {
+        sawPositiveMention = true;
+        if (!drink.preset.decaf) sawCaffeinated = true;
+      }
       continue;
     }
-
     sawPositiveMention = true;
-    // The field is *last* caffeine, so the latest stated time wins.
-    if (time !== null && (latest === null || time > latest)) latest = time;
+
+    const count = countBefore(lower, drink);
+
+    // "Decaf latte" is a latte by name and a decaf by dose, so it is scored as
+    // whatever the catalogue says decaf costs — not as a latte, and not as a
+    // guessed zero.
+    const prefixDecaf = !drink.preset.decaf && DECAF_PREFIX.test(lower.slice(Math.max(0, drink.start - 20), drink.start));
+    const effective = prefixDecaf ? (decafPreset ?? { ...drink.preset, mg: 0, decaf: true }) : drink.preset;
+    const decaf = effective.decaf ?? false;
+    const mg = DOSELESS.has(effective.id) ? null : count * effective.mg;
+
+    events.push({
+      presetId: effective.id,
+      label: prefixDecaf ? `Decaf ${drink.preset.label.toLowerCase()}` : drink.preset.label,
+      count,
+      mg,
+      time,
+    });
+
+    if (mg !== null) totalMg = (totalMg ?? 0) + mg;
+    if (!decaf) sawCaffeinated = true;
+    // The field is *last* caffeine, and a decaf does not move it.
+    if (!decaf && time !== null && (latest === null || time > latest)) latest = time;
   }
 
-  if (latest !== null) return { lastCaffeine: latest, caffeineStatus: 'time' };
-  return { lastCaffeine: null, caffeineStatus: sawPositiveMention ? 'unclear' : 'none' };
+  if (latest !== null) return { events, lastCaffeine: latest, totalMg, caffeineStatus: 'time' };
+
+  // A decaf-only day is a day with no caffeine in it. Reporting that as
+  // `unclear` would hide a real answer behind a shrug.
+  const status: CaffeineStatus = sawPositiveMention && sawCaffeinated ? 'unclear' : 'none';
+  return { events, lastCaffeine: null, totalMg, caffeineStatus: status };
 }

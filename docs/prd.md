@@ -49,6 +49,13 @@ Each layer ships on its own and is gated by evidence from the layer before it. *
 > Recorded here rather than quietly done: the code is cheap and reversible, but
 > the evidence the gate protects is not, so the rules are tuned on invented
 > sentences until real entries exist. See §16.
+>
+> Layer 2 also carries a **preset catalogue** (drinks, aliases, doses in mg,
+> user-overridable via `DROWSE_PRESETS`) and a **quick-log path** that needs no
+> model. The catalogue is the extractor's only vocabulary, so the two cannot
+> drift apart — a test asserts every preset survives quick-log → parse. Dose is
+> new scope beyond the PRD's `lastCaffeine`: timing alone treats a 200mg cold
+> brew and a 63mg latte as the same input, which they are not.
 
 **Deferred, not layered:** `exercise` (cheap, probably worth adding eventually), `alcohol` (near-constant for me, and a constant explains no variance — recoverable from transcript any time), food (§8), everything in §15.
 
@@ -82,6 +89,8 @@ Each layer ships on its own and is gated by evidence from the layer before it. *
 | `sleepDuration` | derived | 1 |
 | `lastCaffeine` | time or null | 2 |
 | `caffeineStatus` | `time` / `none` / `unclear` / `unmentioned` | 2 |
+| `caffeineMg` | integer or null | 2 |
+| `caffeineEvents` | list of `{presetId, label, count, mg, time}` | 2 |
 | `isWeekend` | boolean | 1 |
 | `extractionVersion` | string | 1 |
 | `promptHash` | string | 1 |
@@ -126,6 +135,8 @@ Morning, roughly the same time. Open the Claude app and talk.
 At Layer 0, Claude stores the transcript and the mood number, and confirms. That's all. The times in that sentence are just sitting in the text until Layer 1 exists.
 
 **Fallback:** a minimal web form for backfill or when voice fails. Backup only.
+
+*As built (Layer 2):* the fallback is a preset quick-log rather than a form — `npm run caffeine -- --preset flat-white --at 14:00`, `POST /caffeine`, or the `log_caffeine` tool. A preset expands into an ordinary sentence and is stored as a normal transcript with `captureMethod: "form"`, so it stays inside the corpus and inside the extractor rather than becoming a second data path. It requires no model, which matters: a tracker reachable only through an LLM is unusable when the connector is down or offline.
 
 ---
 
@@ -299,13 +310,20 @@ situation the gate in §13 was written to prevent.
   yet measurable. It becomes measurable at 10 entries, not before.
 - The rules assume a phrasing — "last coffee at 2pm". They do worse on "coffee at
   8, another at 1:15" and on times without am/pm. If the natural way of speaking
-  turns out to be different, the rules move, not the speech.
+  turns out to be different, the rules move, not the speech. The quick-log path
+  is the escape hatch: a preset id and a clock time cannot be misparsed.
+- **The doses are catalogue defaults, not your drinks.** A 95mg "coffee" is a
+  mid-range published figure; your machine, beans and mug are not mid-range.
+  Override them in `DROWSE_PRESETS` before the numbers get used for anything, and
+  remember that changing a dose bumps `rulesetHash` — old records go visibly
+  stale until `reextract_all` runs, which is the intended behaviour.
 - No number produced before the first real check should be trusted enough to set
   an intervention target (§9).
 
 **First honest check:** after 10 logged days, read the 10 transcripts against
-their 10 derived values by hand. Wrong values mean the rules change and
-`reextract_all` runs — never that a transcript is edited (§2.5).
+their 10 derived values by hand. `caffeineEvents` makes this tractable — a wrong
+total names the drink that caused it. Wrong values mean the rules or a preset
+change and `reextract_all` runs — never that a transcript is edited (§2.5).
 
 Nothing here is at risk while this is open: transcripts are append-only and
 untouched by extraction, and every derived value can be thrown away and
