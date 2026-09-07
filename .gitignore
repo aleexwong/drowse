@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+service-account*.json
+gcloud-key*.json
+
+# Corpus exports contain the full journal. Keep them off GitHub.
+exports/
+*.drowse.json
