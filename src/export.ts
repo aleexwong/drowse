@@ -23,8 +23,8 @@ const config = loadConfig({ requireToken: false });
 const store = createStore(config);
 
 try {
-  const transcripts = await store.listAll();
-  const payload = JSON.stringify(buildExport(transcripts), null, 2);
+  const [transcripts, derived] = await Promise.all([store.listAll(), store.listAllDerived()]);
+  const payload = JSON.stringify(buildExport(transcripts, derived), null, 2);
 
   if (values.out) {
     await mkdir(dirname(values.out), { recursive: true });

@@ -2,8 +2,9 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { extractToken, tokenMatches } from './auth.ts';
 import type { Config } from './config.ts';
+import { EXTRACTION_VERSION } from './extract/index.ts';
 import { createMcpServer, SERVER_NAME, SERVER_VERSION } from './mcp.ts';
-import type { TranscriptStore } from './store/types.ts';
+import type { DerivedEntry, Store } from './store/types.ts';
 
 const JSONRPC_ERROR = (code: number, message: string) => ({
   jsonrpc: '2.0' as const,
@@ -11,7 +12,7 @@ const JSONRPC_ERROR = (code: number, message: string) => ({
   id: null,
 });
 
-export function createApp(store: TranscriptStore, config: Config) {
+export function createApp(store: Store, config: Config) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '2mb' }));
@@ -67,12 +68,12 @@ export function createApp(store: TranscriptStore, config: Config) {
   // Nothing here is reachable from a logging conversation (PRD §6).
   const handleExport = async (_req: Request, res: Response) => {
     try {
-      const transcripts = await store.listAll();
+      const [transcripts, derived] = await Promise.all([store.listAll(), store.listAllDerived()]);
       res
         .status(200)
         .type('application/json')
         .set('Content-Disposition', 'attachment; filename="drowse-export.json"')
-        .send(JSON.stringify(buildExport(transcripts), null, 2));
+        .send(JSON.stringify(buildExport(transcripts, derived), null, 2));
     } catch (error) {
       console.error(JSON.stringify({ event: 'export.error', message: String(error) }));
       res.status(500).json({ error: 'Export failed' });
@@ -89,13 +90,18 @@ export function createApp(store: TranscriptStore, config: Config) {
   return app;
 }
 
-export function buildExport(transcripts: { id: string }[]) {
+export function buildExport(transcripts: { id: string }[], derived: DerivedEntry[] = []) {
   return {
+    // Still v1: the transcript shape has not changed, and `derived` is additive.
+    // Transcripts are the backup that matters; derived rows ride along so an
+    // export is a complete snapshot rather than a re-extraction job.
     schema: 'drowse.transcripts.v1',
     server: SERVER_NAME,
     serverVersion: SERVER_VERSION,
+    extractionVersion: EXTRACTION_VERSION,
     exportedAt: new Date().toISOString(),
     count: transcripts.length,
     transcripts,
+    derived,
   };
 }

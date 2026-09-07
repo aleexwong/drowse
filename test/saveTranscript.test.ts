@@ -17,6 +17,7 @@ const config: Config = {
   defaultPhase: 'baseline',
   store: 'memory',
   collection: 'transcripts',
+  derivedCollection: 'derived',
   projectId: undefined,
   databaseId: undefined,
 };

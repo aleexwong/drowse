@@ -34,6 +34,7 @@ export interface Config {
   defaultPhase: Phase;
   store: 'firestore' | 'memory';
   collection: string;
+  derivedCollection: string;
   projectId: string | undefined;
   databaseId: string | undefined;
 }
@@ -62,6 +63,7 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     defaultPhase: phase('DROWSE_DEFAULT_PHASE', 'baseline'),
     store,
     collection: process.env.DROWSE_COLLECTION ?? 'transcripts',
+    derivedCollection: process.env.DROWSE_DERIVED_COLLECTION ?? 'derived',
     projectId: process.env.GOOGLE_CLOUD_PROJECT,
     databaseId: process.env.FIRESTORE_DATABASE_ID,
   };

@@ -44,6 +44,12 @@ Each layer ships on its own and is gated by evidence from the layer before it. *
 | **3** | Read access — `query_entries` in a separate chat | I actually ask something useful |
 | **4** | Chart — 30 days, sleep + mood, phase bands | Only if Layer 3 leaves me wanting it |
 
+> **Build note, Sep 2026 — Layer 2 shipped out of order.** The caffeine extractor
+> was built on request before its gate (§13) was met, and before Layer 1 exists.
+> Recorded here rather than quietly done: the code is cheap and reversible, but
+> the evidence the gate protects is not, so the rules are tuned on invented
+> sentences until real entries exist. See §16.
+
 **Deferred, not layered:** `exercise` (cheap, probably worth adding eventually), `alcohol` (near-constant for me, and a constant explains no variance — recoverable from transcript any time), food (§8), everything in §15.
 
 **Why alcohol is deprioritised:** same reasoning that cut caffeine *amount*. If it barely varies, it cannot explain variance in mood. It stays in the transcript, so extracting it later costs nothing.
@@ -75,12 +81,15 @@ Each layer ships on its own and is gated by evidence from the layer before it. *
 | `wakeTime` | time or null | 1 |
 | `sleepDuration` | derived | 1 |
 | `lastCaffeine` | time or null | 2 |
+| `caffeineStatus` | `time` / `none` / `unclear` / `unmentioned` | 2 |
 | `isWeekend` | boolean | 1 |
 | `extractionVersion` | string | 1 |
 | `promptHash` | string | 1 |
 | `extractedAt` | timestamp | 1 |
 
 `null` means "not mentioned", which is **not** the same as `false` or zero. Do not collapse them.
+
+`caffeineStatus` is what stops that collapse for caffeine specifically. A `null` time can mean three different days — none drunk, drunk at an unstated hour, never mentioned — and the Layer 3 gate ("is there real spread in the timing?") is unanswerable if those look alike.
 
 Note `phase` lives on the transcript, not the derived record — it is a fact about the day, not an extraction result.
 
@@ -97,6 +106,8 @@ This is also the only thing that cannot be recovered retroactively. Every other 
 ### 4.3 Extraction versioning (Layer 1+)
 
 Every derived record stores `extractionVersion` and `promptHash`.
+
+*As built (Layer 2):* the caffeine extractor is a deterministic rule set, not a prompt, so the field is called `rulesetHash` and holds a hash of the rules themselves. Rules were chosen over a model call so that `reextract_all` runs offline, costs nothing per entry, and returns the same value for the same transcript forever — a measuring stick that drifts between baseline and intervention invalidates the comparison (§9).
 
 - Improving the extractor does **not** silently change old numbers.
 - Re-extraction is a deliberate, whole-dataset operation that bumps the version.
@@ -128,6 +139,8 @@ At Layer 0, Claude stores the transcript and the mood number, and confirms. That
 | `query_entries` | 3 | Rows + transcripts |
 
 `save_transcript` and `extract_entry` **must not** read history. Only `query_entries` does, and it is never called in a logging conversation.
+
+*As built (Layer 2):* there is no `extract_entry`. Extraction is deterministic and runs inside `save_transcript`, so a per-entry tool would only add a way to point extraction at a day other than the one just spoken. `reextract_all` covers the retroactive case and returns counts — never a transcript, a date, or a single day's values — so it stays safe to expose on the same connector.
 
 **Extraction rules (Layer 1+)**
 - Times: strict `HH:MM`. Vague input → ask once, then null.
@@ -271,3 +284,30 @@ Revisit only after 60 days of real use:
 - Wearable import
 - Correlation stats beyond eyeballing a chart
 - Any UI polish
+
+---
+
+## 16. Open — caffeine extractor accuracy
+
+The Layer 2 extractor exists (§3 build note) but has never run against a real
+morning. Its rules were tuned on invented sentences, which is exactly the
+situation the gate in §13 was written to prevent.
+
+**What that means in practice:**
+
+- The kill criterion "extraction wrong on more than 1 in 10 entries" (§14) is not
+  yet measurable. It becomes measurable at 10 entries, not before.
+- The rules assume a phrasing — "last coffee at 2pm". They do worse on "coffee at
+  8, another at 1:15" and on times without am/pm. If the natural way of speaking
+  turns out to be different, the rules move, not the speech.
+- No number produced before the first real check should be trusted enough to set
+  an intervention target (§9).
+
+**First honest check:** after 10 logged days, read the 10 transcripts against
+their 10 derived values by hand. Wrong values mean the rules change and
+`reextract_all` runs — never that a transcript is edited (§2.5).
+
+Nothing here is at risk while this is open: transcripts are append-only and
+untouched by extraction, and every derived value can be thrown away and
+recomputed. The cost of building early was spending the tuning budget on guesses,
+not data.

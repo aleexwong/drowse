@@ -16,6 +16,7 @@ const config: Config = {
   defaultPhase: 'baseline',
   store: 'memory',
   collection: 'transcripts',
+  derivedCollection: 'derived',
   projectId: undefined,
   databaseId: undefined,
 };
@@ -80,10 +81,11 @@ describe('MCP surface', () => {
     const client = await connect(`${baseUrl}/mcp/${TOKEN}`);
     const { tools } = await client.listTools();
     assert.deepEqual(
-      tools.map((t) => t.name),
-      ['save_transcript'],
+      tools.map((t) => t.name).sort(),
+      ['reextract_all', 'save_transcript'],
     );
-    // No read path exists at Layer 0 — a logging conversation cannot see history.
+    // Still no read path — a logging conversation cannot see history. Layer 2
+    // added extraction, not access: reextract_all returns counts only.
     assert.equal(
       tools.some((t) => t.name === 'query_entries'),
       false,
@@ -104,8 +106,21 @@ describe('MCP surface', () => {
 
     const content = result.content as { type: string; text: string }[];
     assert.equal(content.length, 1);
-    assert.equal(content[0]?.text, 'Saved — mood 3.');
+    assert.equal(content[0]?.text, 'Saved — caffeine 14:00, mood 3.');
     assert.equal(content[0]?.text.includes('\n'), false);
+    await client.close();
+  });
+
+  test('reextract_all returns counts and no entries', async () => {
+    const client = await connect(`${baseUrl}/mcp/${TOKEN}`);
+    const result = await client.callTool({ name: 'reextract_all', arguments: {} });
+    const content = result.content as { type: string; text: string }[];
+    const line = content[0]?.text ?? '';
+
+    assert.match(line, /^Re-extracted \d+ transcript\(s\) at caffeine-1\.0\.0/);
+    assert.match(line, /1 with a caffeine time/);
+    // The summary must not leak a transcript, a date, or a single day's value.
+    assert.equal(/bed around 11:40|2026-09-07|14:00/.test(line), false);
     await client.close();
   });
 
@@ -139,6 +154,16 @@ describe('export', () => {
     assert.equal(entry.captureMethod, 'voice');
     assert.equal(entry.phase, 'baseline');
     assert.ok(Date.parse(entry.capturedAt));
+
+    // Derived rows ride along, keyed back to the transcript they came from.
+    const derived = body.derived.find(
+      (d: { transcriptId: string }) => d.transcriptId === entry.id,
+    );
+    assert.ok(derived, 'the derived record is in the export');
+    assert.equal(derived.lastCaffeine, '14:00');
+    assert.equal(derived.caffeineStatus, 'time');
+    assert.equal(derived.extractionVersion, 'caffeine-1.0.0');
+    assert.ok(derived.rulesetHash);
   });
 
   test('the path-token form works too', async () => {

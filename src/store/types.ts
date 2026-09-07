@@ -1,3 +1,5 @@
+import type { CaffeineStatus } from '../extract/caffeine.ts';
+
 export type CaptureMethod = 'voice' | 'form';
 export type Phase = 'baseline' | 'intervention' | 'washout';
 
@@ -33,3 +35,41 @@ export interface TranscriptStore {
 
   close(): Promise<void>;
 }
+
+/**
+ * A derived record is regenerable (PRD §2.1, §4.1). It is keyed by
+ * `transcriptId`, one per transcript, and re-extraction overwrites it — the
+ * opposite of the transcripts collection, which is append-only.
+ *
+ * Layer 2 fills in caffeine only. `bedtime`, `wakeTime`, `sleepDuration` and
+ * `isWeekend` are Layer 1 and are deliberately absent rather than stored as
+ * placeholder nulls: an absent field cannot be mistaken for "not mentioned".
+ */
+export interface DerivedEntry {
+  transcriptId: string;
+  /** Copied from the transcript so derived rows sort and join without a lookup. */
+  date: string;
+  /** Strict HH:MM (24-hour), or null. */
+  lastCaffeine: string | null;
+  caffeineStatus: CaffeineStatus;
+  extractionVersion: string;
+  /** PRD calls this `promptHash`; the extractor is rules, not a prompt. */
+  rulesetHash: string;
+  extractedAt: string;
+}
+
+export interface DerivedStore {
+  /**
+   * Write one derived record, overwriting any earlier one for the same
+   * transcript. Overwriting is correct here and wrong for transcripts: a
+   * derived value is a claim about a transcript, and the newest extractor
+   * makes the best claim.
+   */
+  putDerived(entry: DerivedEntry): Promise<void>;
+
+  /** Every derived record, oldest first. Export and re-extraction only. */
+  listAllDerived(): Promise<DerivedEntry[]>;
+}
+
+/** Everything the server can talk to. */
+export interface Store extends TranscriptStore, DerivedStore {}

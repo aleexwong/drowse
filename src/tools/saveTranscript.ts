@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { todayIn, type Config } from '../config.ts';
-import type { Transcript, TranscriptStore } from '../store/types.ts';
+import { caffeineSummary, extractDerived } from '../extract/index.ts';
+import type { DerivedEntry, Store, Transcript } from '../store/types.ts';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -62,21 +63,42 @@ export function buildTranscript(
 }
 
 /**
- * One line, no commentary (PRD §6). Layer 0 confirms the mood and nothing else —
- * no comparison to previous days, no reflection, no follow-up question.
+ * One line, no commentary (PRD §6): the values just extracted from *this* entry
+ * and nothing else. No comparison to previous days, no reflection, no follow-up
+ * question. Everything on the line came out of the transcript that was just
+ * spoken, so it reveals no history.
  */
-export function confirmationLine(transcript: Transcript): string {
-  return transcript.statedMood === null
-    ? 'Saved — no mood stated.'
-    : `Saved — mood ${transcript.statedMood}.`;
+export function confirmationLine(transcript: Transcript, derived?: DerivedEntry | null): string {
+  const parts: string[] = [];
+
+  const caffeine = derived ? caffeineSummary(derived) : null;
+  if (caffeine) parts.push(caffeine);
+
+  parts.push(transcript.statedMood === null ? 'no mood stated' : `mood ${transcript.statedMood}`);
+  return `Saved — ${parts.join(', ')}.`;
 }
 
 export async function saveTranscript(
   input: SaveTranscriptInput,
-  store: TranscriptStore,
+  store: Store,
   config: Config,
-): Promise<{ transcript: Transcript; confirmation: string }> {
+): Promise<{ transcript: Transcript; derived: DerivedEntry | null; confirmation: string }> {
   const transcript = buildTranscript(input, config);
   await store.append(transcript);
-  return { transcript, confirmation: confirmationLine(transcript) };
+
+  // Extraction runs after the append and never before it. The transcript is the
+  // source of truth (PRD §2.1) — a broken extractor must not be able to lose an
+  // entry, so a failure here is logged and the save still stands.
+  let derived: DerivedEntry | null = null;
+  try {
+    derived = extractDerived(transcript);
+    await store.putDerived(derived);
+  } catch (error) {
+    console.error(
+      JSON.stringify({ event: 'extract.failed', id: transcript.id, message: String(error) }),
+    );
+    derived = null;
+  }
+
+  return { transcript, derived, confirmation: confirmationLine(transcript, derived) };
 }
